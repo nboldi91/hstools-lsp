@@ -1,0 +1,55 @@
+name:                hstools-lsp
+version:             0.1.0.0
+github:              "nboldi91/hstools-lsp"
+license:             BSD3
+author:              "Boldizsar Nemeth"
+maintainer:          "nboldi91@gmail.com"
+copyright:           "2022 Boldizsarn Nemeth"
+
+extra-source-files:
+- README.md
+- ChangeLog.md
+
+# Metadata used when publishing your package
+# synopsis:            Short description of your package
+# category:            Web
+
+# To avoid duplicated efforts in documentation and dealing with the
+# complications of embedding Haddock markup inside cabal files, it is
+# common to point users to the README.md file.
+description:         Please see the README on GitHub at <https://github.com/nboldi91/hstools-lsp#readme>
+
+dependencies:
+- base >= 4.7 && < 5
+
+library:
+  source-dirs: src
+
+executables:
+  hstools-lsp:
+    main:                Main.hs
+    source-dirs:         app
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    dependencies:
+    - hstools-lsp
+    - lsp >= 1.5
+    - lsp-types >= 1.5
+    - text
+    - lens
+    - postgresql-simple
+    - bytestring
+    - aeson
+
+tests:
+  hstools-lsp-test:
+    main:                Spec.hs
+    source-dirs:         test
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    dependencies:
+    - hstools-lsp
