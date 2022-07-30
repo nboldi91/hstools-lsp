@@ -40,7 +40,6 @@ handlers = mconcat
       cfg <- LSP.getConfig
       case (uriToFilePath uri, connection cfg) of
         (Just file, Just conn) -> do
-          sendNotification SWindowShowMessage (ShowMessageParams MtInfo $ T.pack $ "Find definition: " ++ show (file, lineNum, columnNum))
           names <- liftIO $ query
               conn
               "SELECT dm.filePath, d.startRow, d.startColumn \
@@ -55,6 +54,34 @@ handlers = mconcat
                 in responder $ Right (InL (Location (filePathToUri file) (LSP.Range pos pos)))
         (Nothing, _) -> responder $ Left $ responseError "Can't go to definition: Document is not a file"
         (_, Nothing) -> responder $ Left $ responseError "Can't go to definition: No database connection"
+
+  , requestHandler STextDocumentHover $ \req responder -> do
+      let RequestMessage _ _ _ (HoverParams (TextDocumentIdentifier uri) pos _workDone) = req
+          Position line column = pos
+          lineNum = fromIntegral line + 1 :: Integer
+          columnNum = fromIntegral column + 1 :: Integer
+      cfg <- LSP.getConfig
+      case (uriToFilePath uri, connection cfg) of
+        (Just file, Just conn) -> do
+          names <- liftIO $ query
+              conn
+              "SELECT n.name, n.startRow, n.startColumn, n.endRow, n.endColumn \
+                  \FROM names n JOIN modules nm ON n.module = nm.moduleId \
+                  \WHERE nm.filePath = ? AND n.startRow <= ? AND n.endRow >= ? AND n.startColumn <= ? AND n.endColumn >= ?"
+              ( file, lineNum, lineNum, columnNum, columnNum )
+          case names of
+              [] -> return ()
+              (name, startLine :: Integer, startColumn :: Integer, endLine :: Integer, endColumn :: Integer):_ -> 
+                let ms = HoverContents $ markedUpContent "hstools" name
+                    range = LSP.Range (Position (fromIntegral startLine - 1) (fromIntegral startColumn - 1)) 
+                                      (Position (fromIntegral endLine - 1) (fromIntegral endColumn - 1))
+                    rsp = Hover ms (Just range)
+                in responder (Right $ Just rsp)  
+        (Nothing, _) -> responder $ Left $ responseError "Can't hover: Document is not a file"
+        (_, Nothing) -> responder $ Left $ responseError "Can't hover: No database connection"
+
+
+  -- TODO: handle cancel
 
   -- TODO: command for cleaning the database
 
