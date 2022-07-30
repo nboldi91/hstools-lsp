@@ -4,7 +4,7 @@ github:              "nboldi91/hstools-lsp"
 license:             BSD3
 author:              "Boldizsar Nemeth"
 maintainer:          "nboldi91@gmail.com"
-copyright:           "2022 Boldizsarn Nemeth"
+copyright:           "2022 Boldizsar Nemeth"
 
 extra-source-files:
 - README.md
