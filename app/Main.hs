@@ -2,6 +2,7 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE DataKinds #-}
 
 import Language.LSP.Server as LSP
 import Language.LSP.Types as LSP
@@ -18,6 +19,8 @@ import Database.PostgreSQL.Simple.Errors
 import qualified Data.ByteString.Char8 as BS
 import qualified Data.Aeson as A
 import qualified Data.Aeson.KeyMap as A
+import Data.Vector (toList)
+
 
 handlers :: Handlers (LspM Config)
 handlers = mconcat
@@ -65,14 +68,14 @@ handlers = mconcat
         (Just file, Just conn) -> do
           names <- liftIO $ query
               conn
-              "SELECT n.name, n.startRow, n.startColumn, n.endRow, n.endColumn \
+              "SELECT n.isDefined, n.name, n.startRow, n.startColumn, n.endRow, n.endColumn \
                   \FROM names n JOIN modules nm ON n.module = nm.moduleId \
                   \WHERE nm.filePath = ? AND n.startRow <= ? AND n.endRow >= ? AND n.startColumn <= ? AND n.endColumn >= ?"
               ( file, lineNum, lineNum, columnNum, columnNum )
           case names of
-              [] -> return ()
-              (name, startLine :: Integer, startColumn :: Integer, endLine :: Integer, endColumn :: Integer):_ -> 
-                let ms = HoverContents $ markedUpContent "hstools" name
+              [] -> responder (Right Nothing)  
+              (isDefined :: Bool, name :: String, startLine :: Integer, startColumn :: Integer, endLine :: Integer, endColumn :: Integer):_ -> 
+                let ms = HoverContents $ markedUpContent "hstools" (T.pack $ name ++ if isDefined then " defined here" else "")
                     range = LSP.Range (Position (fromIntegral startLine - 1) (fromIntegral startColumn - 1)) 
                                       (Position (fromIntegral endLine - 1) (fromIntegral endColumn - 1))
                     rsp = Hover ms (Just range)
@@ -83,17 +86,23 @@ handlers = mconcat
 
   -- TODO: handle cancel
 
-  -- TODO: command for cleaning the database
-
-  -- , requestHandler SWorkspaceExecuteCommand $ \cmds other ->
-      -- _
-      -- forM_ cmds $ \cmd ->
-      --   case cmd of
-      --     "cleanDB" -> sendNotification SWindowShowMessage (ShowMessageParams MtInfo "Cleaning DB")
-      --     _ -> sendNotification SWindowShowMessage (ShowMessageParams MtError ("Command not recognized: " `T.append` cmd))
+  , notificationHandler (SCustomMethod "CleanDB") $ \message -> do
+      let NotificationMessage _ _ args = message
+      cfg <- LSP.getConfig
+      case (args, connection cfg) of
+        (A.Array (toList -> [ A.Null ]), Just conn) -> do
+          liftIO $ execute_ conn "TRUNCATE modules, names"
+          sendMessage "DB cleaned"
+        (A.Array (toList -> [ A.String s ]), Just conn)
+          -> sendMessage $ "Cleaning DB for path: " <> s
+        (_, Nothing) -> sendError "CleanDB needs DB connection"
+        (_, _) -> sendError $ T.pack $ "Unrecognized CleanDB argument: " ++ show args
   ]
 
 responseError m = ResponseError InvalidRequest m Nothing
+
+sendMessage = sendNotification SWindowShowMessage . ShowMessageParams MtInfo
+sendError = sendNotification SWindowShowMessage . ShowMessageParams MtError
 
 tryToConnectToDB :: LspM Config ()
 tryToConnectToDB = do
@@ -101,7 +110,7 @@ tryToConnectToDB = do
   connOrError <- liftIO $ try $ connectPostgreSQL (BS.pack (postgresqlConnectionString config))
   case connOrError of
     Right conn -> do 
-      sendNotification SWindowShowMessage (ShowMessageParams MtInfo "Connected to DB")
+      sendMessage "Connected to DB"
       LSP.setConfig (config { connection = Just conn })
     Left (e :: SomeException) -> return () -- error is OK
 
@@ -111,7 +120,7 @@ main = runServer $ ServerDefinition
   , doInitialize = \env _req -> pure $ Right env
   , staticHandlers = handlers
   , interpretHandler = \env -> Iso (runLspT env) liftIO
-  , options = defaultOptions
+  , options = defaultOptions { executeCommandCommands = Just ["cleanDB"] }
   , defaultConfig = Config "" Nothing
   }
 

@@ -42,6 +42,7 @@ executables:
     - postgresql-simple
     - bytestring
     - aeson
+    - vector
 
 tests:
   hstools-lsp-test:
