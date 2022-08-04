@@ -11,7 +11,7 @@ homepage:       https://github.com/nboldi91/hstools-lsp#readme
 bug-reports:    https://github.com/nboldi91/hstools-lsp/issues
 author:         Boldizsar Nemeth
 maintainer:     nboldi91@gmail.com
-copyright:      2022 Boldizsarn Nemeth
+copyright:      2022 Boldizsar Nemeth
 license:        BSD3
 license-file:   LICENSE
 build-type:     Simple

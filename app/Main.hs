@@ -91,7 +91,7 @@ handlers = mconcat
       cfg <- LSP.getConfig
       case (args, connection cfg) of
         (A.Array (toList -> [ A.Null ]), Just conn) -> do
-          liftIO $ execute_ conn "TRUNCATE modules, names"
+          liftIO $ execute_ conn "drop table modules, names"
           sendMessage "DB cleaned"
         (A.Array (toList -> [ A.String s ]), Just conn)
           -> sendMessage $ "Cleaning DB for path: " <> s
