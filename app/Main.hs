@@ -12,6 +12,7 @@ import Control.Monad
 import Control.Exception
 import qualified Data.Text as T
 import Data.Maybe (fromMaybe, isNothing)
+import Data.String (IsString(..))
 import Control.Lens hiding (Iso)
 import Database.PostgreSQL.Simple
 import Database.PostgreSQL.Simple.FromField
@@ -58,6 +59,30 @@ handlers = mconcat
         (Nothing, _) -> responder $ Left $ responseError "Can't go to definition: Document is not a file"
         (_, Nothing) -> responder $ Left $ responseError "Can't go to definition: No database connection"
 
+  , requestHandler STextDocumentReferences $ \req responder -> do
+      let RequestMessage _ _ _ (ReferenceParams (TextDocumentIdentifier uri) pos _ _ (ReferenceContext includeDefinition)) = req
+          Position line column = pos
+          lineNum = fromIntegral line + 1 :: Integer
+          columnNum = fromIntegral column + 1 :: Integer
+      cfg <- LSP.getConfig
+      case (uriToFilePath uri, connection cfg) of
+        (Just file, Just conn) -> do
+          names <- liftIO $ query
+              conn
+              (fromString $ "SELECT dm.filePath, d.startRow, d.startColumn \
+                  \FROM names AS n JOIN names AS d ON n.name = d.name JOIN modules nm ON n.module = nm.moduleId JOIN modules dm ON d.module = dm.moduleId \
+                  \WHERE nm.filePath = ? AND n.startRow <= ? AND n.endRow >= ? AND n.startColumn <= ? AND n.endColumn >= ?"
+                    ++ (if not includeDefinition then "\n AND d.isDefined = FALSE" else ""))
+              ( file, lineNum, lineNum, columnNum, columnNum )
+          let
+            toPos line col = Position (fromIntegral line - 1) (fromIntegral col - 1) 
+            lineToLoc :: (String, Integer, Integer) -> LSP.Location
+            lineToLoc (file,line,col) = Location (filePathToUri file) (LSP.Range (toPos line col) (toPos line col))
+          responder $ Right $ LSP.List (map lineToLoc names)
+        (Nothing, _) -> responder $ Left $ responseError "Can't go to definition: Document is not a file"
+        (_, Nothing) -> responder $ Left $ responseError "Can't go to definition: No database connection"
+
+
   , requestHandler STextDocumentHover $ \req responder -> do
       let RequestMessage _ _ _ (HoverParams (TextDocumentIdentifier uri) pos _workDone) = req
           Position line column = pos
@@ -84,7 +109,7 @@ handlers = mconcat
         (_, Nothing) -> responder $ Left $ responseError "Can't hover: No database connection"
 
 
-  -- TODO: handle cancel
+  , notificationHandler SCancelRequest $ const $ return ()
 
   , notificationHandler (SCustomMethod "CleanDB") $ \message -> do
       let NotificationMessage _ _ args = message
