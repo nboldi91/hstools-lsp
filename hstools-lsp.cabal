@@ -49,6 +49,7 @@ executable hstools-lsp
     , lens
     , lsp >=1.5
     , lsp-types >=1.5
+    , mtl
     , postgresql-simple
     , text
     , vector

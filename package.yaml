@@ -43,6 +43,7 @@ executables:
     - bytestring
     - aeson
     - vector
+    - mtl
 
 tests:
   hstools-lsp-test:
