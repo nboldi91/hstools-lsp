@@ -54,11 +54,9 @@ handlers = mconcat
                 \WHERE nm.filePath = ? AND n.startRow <= ? AND n.endRow >= ? AND n.startColumn <= ? AND n.endColumn >= ? \
                 \AND dn.isDefined = TRUE"
             ( file, lineNum, lineNum, columnNum, columnNum )
-          case names of
-            [] -> liftLSP $ responder $ Left $ responseError "Definition not found"
-            (file, defLine :: Integer, defColumn :: Integer):_ -> 
-              let pos = Position (fromIntegral defLine - 1) (fromIntegral defColumn - 1)
-              in liftLSP $ responder $ Right (InL (Location (filePathToUri file) (LSP.Range pos pos)))
+          let toResult (file, defLine :: Int, defCol :: Int) = Location (filePathToUri file) (LSP.Range pos pos)
+                where pos = Position (fromIntegral defLine - 1) (fromIntegral defCol - 1)
+          liftLSP $ responder $ Right (InR (InL (LSP.List $ map toResult names)))
 
   , requestHandler STextDocumentReferences $ \req responder -> runInContext "References" $ do
       let RequestMessage _ _ _ (ReferenceParams (TextDocumentIdentifier uri) pos _ _ (ReferenceContext includeDefinition)) = req
