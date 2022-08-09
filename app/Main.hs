@@ -56,7 +56,7 @@ handlers = mconcat
             ( file, lineNum, lineNum, columnNum, columnNum )
           let toResult (file, defLine :: Int, defCol :: Int) = Location (filePathToUri file) (LSP.Range pos pos)
                 where pos = Position (fromIntegral defLine - 1) (fromIntegral defCol - 1)
-          liftLSP $ responder $ Right (InR (InL (LSP.List $ map toResult names)))
+          liftLSP $ responder $ Right (InR (InL (LSP.List $ take 1 $ map toResult names)))
 
   , requestHandler STextDocumentReferences $ \req responder -> runInContext "References" $ do
       let RequestMessage _ _ _ (ReferenceParams (TextDocumentIdentifier uri) pos _ _ (ReferenceContext includeDefinition)) = req
