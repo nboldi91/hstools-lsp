@@ -93,7 +93,7 @@ handlers = mconcat
             conn
             "SELECT tn.type, nn.isDefined, nn.name, n.startRow, n.startColumn, n.endRow, n.endColumn \
                 \FROM ast n \
-                \LEFT JOIN names nn ON nn.astNode = n.astId \
+                \JOIN names nn ON nn.astNode = n.astId \
                 \JOIN modules nm ON n.module = nm.moduleId \
                 \LEFT JOIN types tn ON n.astId = tn.astNode \
                 \WHERE nm.filePath = ? AND n.startRow <= ? AND n.endRow >= ? AND n.startColumn <= ? AND n.endColumn >= ?"
@@ -102,7 +102,7 @@ handlers = mconcat
             [] -> liftLSP $ responder (Right Nothing)  
             (typ, isDefined, name, startLine :: Integer, startColumn :: Integer, endLine :: Integer, endColumn :: Integer):_ -> 
               let ms = HoverContents $ markedUpContent "hstools" $ T.pack
-                          $ name ++ (if isDefined == Just True then " defined here" else "")
+                          $ name ++ (if isDefined == True then " defined here" else "")
                               ++ (maybe "" ("\n  :: " ++) typ)
                   range = LSP.Range (Position (fromIntegral startLine - 1) (fromIntegral startColumn - 1)) 
                                     (Position (fromIntegral endLine - 1) (fromIntegral endColumn - 1))
@@ -117,7 +117,7 @@ handlers = mconcat
       withConnection $ \conn ->
         case args of
           A.Array (toList -> [ A.Null ]) -> do
-            liftIO $ execute_ conn "drop table modules, ast, names, types cascade"
+            liftIO $ execute_ conn "drop table modules, ast, names, types, thRanges cascade"
             sendMessage "DB cleaned"
           A.Array (toList -> [ A.String s ])
             -> sendMessage $ "Cleaning DB for path: " <> s
