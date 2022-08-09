@@ -47,7 +47,7 @@ handlers = mconcat
             conn
             "SELECT dm.filePath, d.startRow, d.startColumn \
                 \FROM ast AS n JOIN names nn ON nn.astNode = n.astId \
-                  \JOIN names AS dn ON nn.name = dn.name \
+                  \JOIN names AS dn ON nn.name = dn.name AND nn.namespace = dn.namespace \
                   \JOIN ast AS d ON d.astId = dn.astNode \
                   \JOIN modules nm ON n.module = nm.moduleId \
                   \JOIN modules dm ON d.module = dm.moduleId \
@@ -69,7 +69,7 @@ handlers = mconcat
             conn
             (fromString $ "SELECT dm.filePath, d.startRow, d.startColumn \
                 \FROM ast AS n JOIN names nn ON nn.astNode = n.astId \
-                  \JOIN names AS dn ON nn.name = dn.name \
+                  \JOIN names AS dn ON nn.name = dn.name AND nn.namespace = dn.namespace \
                   \JOIN ast AS d ON d.astId = dn.astNode \
                   \JOIN modules nm ON n.module = nm.moduleId \
                   \JOIN modules dm ON d.module = dm.moduleId \
