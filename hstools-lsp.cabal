@@ -23,6 +23,20 @@ source-repository head
   type: git
   location: https://github.com/nboldi91/hstools-lsp
 
+library
+  exposed-modules:
+      Language.Haskell.HsTools.LinesDiff
+  other-modules:
+      Paths_hstools_lsp
+  hs-source-dirs:
+      src
+  build-depends:
+      Diff
+    , base >=4.7 && <5
+    , containers
+    , split
+  default-language: Haskell2010
+
 executable hstools-lsp
   main-is: Main.hs
   other-modules:
@@ -34,11 +48,14 @@ executable hstools-lsp
       aeson
     , base >=4.7 && <5
     , bytestring
+    , containers
+    , hstools-lsp
     , lens
     , lsp >=1.5
     , lsp-types >=1.5
     , mtl
     , postgresql-simple
     , text
+    , time
     , vector
   default-language: Haskell2010
