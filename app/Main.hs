@@ -25,13 +25,16 @@ import Data.Time.Clock
 import Database.PostgreSQL.Simple
 import Database.PostgreSQL.Simple.FromField
 import Database.PostgreSQL.Simple.Errors
+import qualified Database.PostgreSQL.Simple.Notification as SQL
 import qualified Data.ByteString.Char8 as BS
 import qualified Data.Aeson as A
 import qualified Data.Aeson.KeyMap as A
-import Data.Vector (toList)
+import qualified Data.Vector as V
+import qualified Data.Aeson.KeyMap as KM
 import Language.Haskell.HsTools.LinesDiff
 import Text.Read (readMaybe)
-
+import Control.Concurrent (forkIO)
+import Control.Concurrent.MVar
 
 handlers :: Handlers (LspM Config)
 handlers = mconcat
@@ -119,40 +122,44 @@ handlers = mconcat
   , notificationHandler (SCustomMethod "CleanDB") $ \message -> runInContext "CleanDB" $ withConnection $ \conn -> do
       let NotificationMessage _ _ args = message
       case args of
-        A.Array (toList -> [ A.Null ]) -> do
+        A.Array (V.toList -> [ A.Null ]) -> do
           liftIO $ execute_ conn "DROP TABLE modules, ast, names, types, thRanges CASCADE"
+          liftIO $ execute_ conn "DROP TRIGGER modulesNotifyChange"
           sendMessage "DB cleaned"
-        A.Array (toList -> [ A.String s ])
+        A.Array (V.toList -> [ A.String s ])
           -> sendMessage $ "Cleaning DB for path: " <> s
         _ -> sendError $ T.pack $ "Unrecognized CleanDB argument: " ++ show args
+      updateFileStates
 
   , notificationHandler SWorkspaceDidChangeWatchedFiles $ \message -> runInContext "FileChange" $ withConnection $ \conn -> do
       let NotificationMessage _ _ (DidChangeWatchedFilesParams (LSP.List fileChanges)) = message
       forM_ fileChanges $ \(FileEvent uri _) -> ensureFileLocation' uri $ \filePath -> do
-        cfg <- LSP.getConfig
-        unless (isFileOpen filePath $ cfFileRecords cfg) $ do
+        isFileOpen <- liftLSP LSP.getConfig >>= liftIO . isFileOpen filePath . cfFileRecords
+        unless isFileOpen $ do
           compiledSource <- liftIO $ query conn "SELECT compiledSource FROM modules WHERE filePath = ?" (Only filePath)
           case compiledSource of
             [[source]] -> do
               updatedSource <- liftIO $ readFile filePath
               let fileDiffs = sourceDiffs startSP source updatedSource
-              modifyConfig' $ \cf -> cf { cfFileRecords = replaceSourceDiffs filePath fileDiffs $ cfFileRecords cf }
+              liftLSP LSP.getConfig >>= \cf -> liftIO $ replaceSourceDiffs filePath fileDiffs $ cfFileRecords cf
               currentTime <- liftIO getCurrentTime
               let serializedDiff = nothingIfEmpty $ serializeSourceDiffs fileDiffs
               void $ liftIO $ execute conn "UPDATE modules SET modifiedTime = ?, modifiedFileDiffs = ? WHERE filePath = ?" (currentTime, serializedDiff, filePath)
             _ -> return () -- the file is not compiled yet, nothing to do
+          updateFileStates
   
   , notificationHandler STextDocumentDidChange $ \msg -> runInContext "STextDocumentDidChange" $ withConnection $ \conn -> do
       let NotificationMessage _ _ (DidChangeTextDocumentParams (VersionedTextDocumentIdentifier uri _version) (LSP.List changes)) = msg
       ensureFileLocation' uri $ \filePath -> do
         let goodChanges = catMaybes $ map textDocChangeToSD changes
-        void $ modifyConfig' $ \cf -> cf { cfFileRecords = updateSavedFileRecords filePath goodChanges (cfFileRecords cf) }
+        liftLSP LSP.getConfig >>= \cf -> liftIO $ updateSavedFileRecords filePath goodChanges (cfFileRecords cf)
+        updateFileStates
 
   , notificationHandler STextDocumentDidSave $ \msg -> runInContext "STextDocumentDidSave" $ withConnection $ \conn -> do
       let NotificationMessage _ _ (DidSaveTextDocumentParams (TextDocumentIdentifier uri) _reason) = msg
       ensureFileLocation' uri $ \filePath -> do
         cfg <- LSP.getConfig
-        let fileDiffs = maybe Map.empty frDiffs $ Map.lookup filePath $ fromMaybe Map.empty $ cfFileRecords cfg
+        fileDiffs <- liftIO $ readMVar (cfFileRecords cfg) >>= return . maybe Map.empty frDiffs . Map.lookup filePath
         currentTime <- liftIO getCurrentTime
         let serializedDiff = serializeSourceDiffs fileDiffs
         void $ liftIO $ execute conn "UPDATE modules SET modifiedTime = ?, modifiedFileDiffs = ? WHERE filePath = ?" (currentTime, serializedDiff, filePath)
@@ -160,12 +167,12 @@ handlers = mconcat
   , notificationHandler STextDocumentDidOpen $ \msg -> runInContext "STextDocumentDidOpen" $ withConnection $ \conn -> do
       let NotificationMessage _ _ (DidOpenTextDocumentParams (TextDocumentItem uri _langId _version content)) = msg
       ensureFileLocation' uri $ \filePath ->
-        void $ modifyConfig $ \cf -> recordFileOpened conn filePath content (cfFileRecords cf) >>= \frs -> return cf{cfFileRecords = frs}
+        liftLSP LSP.getConfig >>= \cf -> liftIO $ recordFileOpened conn filePath content (cfFileRecords cf)
   
   , notificationHandler STextDocumentDidClose $ \msg -> runInContext "STextDocumentDidClose" $ withConnection $ \conn -> do
       let NotificationMessage _ _ (DidCloseTextDocumentParams (TextDocumentIdentifier uri)) = msg
       ensureFileLocation' uri $ \filePath ->
-        void $ modifyConfig $ \cf -> recordFileClosed conn filePath (cfFileRecords cf) >>= \frs -> return cf{cfFileRecords = frs}
+        liftLSP LSP.getConfig >>= \cf -> liftIO $ recordFileClosed conn filePath (cfFileRecords cf)
  
   ]
 
@@ -212,19 +219,46 @@ sendError = liftLSP . sendNotification SWindowShowMessage . ShowMessageParams Mt
 logMessage :: T.Text -> LspMonad ()
 logMessage = liftLSP . sendNotification SWindowLogMessage . LogMessageParams MtInfo
 
+updateFileStates :: LspMonad ()
+updateFileStates = do
+  cfg <- LSP.getConfig
+  fr <- liftIO $ readMVar $ cfFileRecords cfg
+  sendFileStates $ Map.toList $ Map.map frDiffs fr
+
+sendFileStates :: [(FilePath, SourceDiffs)] -> LspMonad ()
+sendFileStates states 
+  = liftLSP $ sendNotification (SCustomMethod "ChangeFileStates") 
+      $ A.Object $ KM.fromList [ ("result", A.Array $ V.fromList $ map (\(fp, diff) -> A.Object $ KM.fromList [("filePath", A.String $ T.pack fp), ("state", toState diff)]) states )]
+  where
+    toState diff = A.String $ if Map.null diff then "fresh" else "edited"
+
+updateFileStates' :: FileRecords -> (FromServerMessage -> IO ()) -> IO ()
+updateFileStates' fileRecords messageHandler = do
+  fr <- readMVar fileRecords
+  sendFileStates' (Map.toList $ Map.map frDiffs fr) messageHandler
+
+sendFileStates' :: [(FilePath, SourceDiffs)] -> (FromServerMessage -> IO ()) -> IO ()
+sendFileStates' states messageHandler
+  = messageHandler $ FromServerMess (SCustomMethod "ChangeFileStates") 
+      $ NotMess $ NotificationMessage "2.0" (SCustomMethod "ChangeFileStates") msg
+  where
+    msg = A.Object $ KM.fromList [ ("result", A.Array $ V.fromList $ map (\(fp, diff) -> A.Object $ KM.fromList [("filePath", A.String $ T.pack fp), ("state", toState diff)]) states )]
+    toState diff = A.String $ if Map.null diff then "fresh" else "edited"
+
+-- Listens to the compile process changing the DB when the source is recompiled
+handleNotifications :: Connection -> FileRecords -> (FromServerMessage -> IO ()) -> IO ()
+handleNotifications conn fileRecords messageHandler = do
+  SQL.Notification _pid channel fileName <- SQL.getNotification conn
+  when (channel == "module_clean") $ do
+    markFileRecordsClean [BS.unpack fileName] fileRecords
+    updateFileStates' fileRecords messageHandler
+  handleNotifications conn fileRecords messageHandler
+
 getRewrites :: FilePath -> LspMonad SourceDiffs
 getRewrites fp = do
   cfg <- liftLSP LSP.getConfig
-  return $ maybe Map.empty frDiffs $ Map.lookup fp $ fromMaybe Map.empty $ cfFileRecords cfg
-
-modifyConfig :: (Config -> LspMonad Config) -> LspMonad Config
-modifyConfig f = do
-  config <- liftLSP LSP.getConfig
-  f config >>= LSP.setConfig
-  return config
-
-modifyConfig' :: (Config -> Config) -> LspMonad Config
-modifyConfig' f = modifyConfig (pure . f)
+  fileRecords <- liftIO $ readMVar $ cfFileRecords cfg
+  return $ maybe Map.empty frDiffs $ Map.lookup fp fileRecords
 
 tryToConnectToDB :: LspMonad ()
 tryToConnectToDB = do
@@ -233,24 +267,27 @@ tryToConnectToDB = do
   case connOrError of
     Right conn -> do 
       sendMessage "Connected to DB"
-      modifiedDiffs <- liftIO $ query_ conn "SELECT filePath, modifiedFileDiffs FROM modules WHERE modifiedFileDiffs IS NOT NULL"
-      let convertDiff (fp, diffs) = (fp, FileRecord $ deserializeSourceDiffs diffs)
-      liftLSP $ LSP.setConfig $
-        config 
-          { cfConnection = Just conn
-          , cfFileRecords = Just (Map.fromList $ map convertDiff modifiedDiffs) 
-          }
+      modifiedDiffs <- liftIO $ query_ conn "SELECT filePath, modifiedFileDiffs FROM modules"
+      let fileRecords = map (\(fp, diff) -> (fp, FileRecord $ fromMaybe Map.empty $ fmap deserializeSourceDiffs diff)) modifiedDiffs
+      liftIO $ putMVar (cfFileRecords config) $ Map.fromList fileRecords
+      liftLSP $ LSP.setConfig $ config { cfConnection = Just conn }
+      updateFileStates
+      env <- getLspEnv
+      liftIO $ execute_ conn "LISTEN module_clean"
+      void $ liftIO $ forkIO (handleNotifications conn (cfFileRecords config) (resSendMessage env))
     Left (e :: SomeException) -> return () -- error is OK
 
 main :: IO Int
-main = runServer $ ServerDefinition
-  { onConfigurationChange = loadConfig
-  , doInitialize = \env _req -> pure $ Right env
-  , staticHandlers = handlers
-  , interpretHandler = \env -> Iso (runLspT env) (liftIO)
-  , options = hstoolsOptions
-  , LSP.defaultConfig = Main.defaultConfig
-  }
+main = do
+  fileStore <- newEmptyMVar
+  runServer $ ServerDefinition
+    { onConfigurationChange = loadConfig
+    , doInitialize = \env _req -> pure $ Right env
+    , staticHandlers = handlers
+    , interpretHandler = \env -> Iso (runLspT env) (liftIO)
+    , options = hstoolsOptions
+    , LSP.defaultConfig = Main.defaultConfig fileStore
+    }
 
 hstoolsOptions :: Options
 hstoolsOptions = defaultOptions
@@ -288,66 +325,70 @@ data FileRecord
   deriving (Show)
 
 -- Nothing means it is not loaded yet from database
-type FileRecords = Maybe (Map.Map FilePath FileRecord)
+type FileRecords = MVar (Map.Map FilePath FileRecord)
 
-recordFileOpened :: Connection -> FilePath -> T.Text -> FileRecords -> LspMonad FileRecords
-recordFileOpened _ _ _ Nothing = error "recordFileOpened: records are not initialized"
-recordFileOpened conn fp content (Just frs)
-  = updateRecord (Map.lookup fp frs) >>= \r -> return $ Just $ Map.alter (const (Just r)) fp frs
+recordFileOpened :: Connection -> FilePath -> T.Text -> FileRecords -> IO ()
+recordFileOpened conn fp content mv
+  = modifyMVar_ mv $ \frs -> updateRecord (Map.lookup fp frs) >>= \r -> return $ Map.alter (const (Just r)) fp frs
   where
     updateRecord Nothing = return $ OpenFileRecord Map.empty contentLines contentLines
     updateRecord (Just (FileRecord diffs)) = do
-      compiledSource <- liftIO $ query conn "SELECT compiledSource FROM modules WHERE filePath = ?" (Only fp)
+      compiledSource <- query conn "SELECT compiledSource FROM modules WHERE filePath = ?" (Only fp)
       case compiledSource of
         [[src]] -> return $ OpenFileRecord diffs (lines src) contentLines
         _ -> error $ "recordFileOpened: file " ++ fp ++ " should have been in the database"
     updateRecord (Just r) = return r
     contentLines = lines $ T.unpack content
 
-recordFileClosed :: Connection -> FilePath -> FileRecords -> LspMonad FileRecords
-recordFileClosed _ _ Nothing = error "recordFileClosed: records are not initialized"
-recordFileClosed conn fp (Just frs)
-  = updateRecord (Map.lookup fp frs) >>= \r -> return $ Just $ Map.insert fp r frs
+recordFileClosed :: Connection -> FilePath -> FileRecords -> IO ()
+recordFileClosed conn fp mv
+  = modifyMVar_ mv $ \frs -> updateRecord (Map.lookup fp frs) >>= \r -> return $ Map.insert fp r frs
   where
     updateRecord (Just (OpenFileRecord diffs compiledContent currentContent)) = do
-      modifiedDiffs <- liftIO $ query conn "SELECT modifiedFileDiffs FROM modules WHERE filePath = ?" (Only fp)
+      modifiedDiffs <- query conn "SELECT modifiedFileDiffs FROM modules WHERE filePath = ?" (Only fp)
       case modifiedDiffs of
         [[src]] -> return $ FileRecord $ Map.fromAscList $ map read $ lines src
         _ -> return $ FileRecord Map.empty
     updateRecord _ = error $ "recordFileClosed: file " ++ fp ++ " should have been on record"
 
-updateSavedFileRecords :: FilePath -> [SourceRewrite] -> FileRecords -> FileRecords
-updateSavedFileRecords _ _ Nothing = error "updateSavedFileRecords: records are not initialized"
-updateSavedFileRecords fp newDiffs (Just frs) = Just $ Map.adjust updateDiffs fp frs
+markFileRecordsClean :: [FilePath] -> FileRecords -> IO ()
+markFileRecordsClean files
+  = modifyMVarPure $ Map.mapWithKey (\fp fr -> if fp `elem` files then fr{frDiffs = Map.empty} else fr)
+
+updateSavedFileRecords :: FilePath -> [SourceRewrite] -> FileRecords -> IO ()
+updateSavedFileRecords fp newDiffs = modifyMVarPure $ Map.adjust updateDiffs fp
   where
     updateDiffs (OpenFileRecord diffs compiledContent currentContent) =
       let (currentContent', diffs') = foldr (addExtraChange compiledContent) (currentContent, diffs) newDiffs
       in OpenFileRecord diffs' compiledContent currentContent'
     updateDiffs _ = error $ "updateSavedFileRecords: file not open: " ++ fp
 
-replaceSourceDiffs :: FilePath -> SourceDiffs -> FileRecords -> FileRecords
-replaceSourceDiffs _ _ Nothing = error "replaceSourceDiffs: records are not initialized"
-replaceSourceDiffs fp diffs (Just frs) = Just $ Map.adjust (\fr -> fr{frDiffs = diffs}) fp frs
+replaceSourceDiffs :: FilePath -> SourceDiffs -> FileRecords -> IO ()
+replaceSourceDiffs fp diffs = modifyMVarPure $ Map.adjust (\fr -> fr{frDiffs = diffs}) fp
 
-isFileOpen :: FilePath -> FileRecords -> Bool
-isFileOpen fp Nothing = error "isFileOpen: records are not initialized"
-isFileOpen fp (Just frs) = case Map.lookup fp frs of
-  Just OpenFileRecord{} -> True
-  _ -> False
+isFileOpen :: FilePath -> FileRecords -> IO Bool
+isFileOpen fp frsMVar = do
+  frs <- readMVar frsMVar
+  return $ case Map.lookup fp frs of
+    Just OpenFileRecord{} -> True
+    _ -> False
+
+modifyMVarPure :: (a -> a) -> MVar a -> IO ()
+modifyMVarPure f mv = modifyMVar_ mv (return . f)
 
 data Config = Config
   { cfPostgresqlConnectionString :: String
   , cfConnection :: Maybe Connection
   , cfOperation :: Maybe String
   , cfFileRecords :: FileRecords
-  } deriving (Show)
+  }
 
-defaultConfig :: Config
-defaultConfig = Config
+defaultConfig :: FileRecords -> Config
+defaultConfig fr = Config
   { cfPostgresqlConnectionString = ""
   , cfConnection = Nothing
   , cfOperation = Nothing
-  , cfFileRecords = Nothing
+  , cfFileRecords = fr
   }
 
 instance Show Connection where
