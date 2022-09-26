@@ -154,7 +154,7 @@ addExtraChange compiledContent rewrite@(SourceRewrite start end replacement) (ac
   where
     newDiffs
       = if null affectedDiffs
-          then Map.insert start (SourceDiffData end replacementDSP) diffs
+          then Map.insert (srStart origRange) (SourceDiffData (srEnd origRange) replacementDSP) diffs
           else Map.union reDiffs unaffectedDiffs
     reDiffs = sourceDiffs
                 (srStart origRangeToReDiff)
