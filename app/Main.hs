@@ -7,6 +7,7 @@
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE TupleSections #-}
 
 import Language.LSP.Server as LSP
 import Language.LSP.Types as LSP
@@ -146,14 +147,14 @@ handlers = mconcat
               let serializedDiff = nothingIfEmpty $ serializeSourceDiffs fileDiffs
               void $ liftIO $ execute conn "UPDATE modules SET modifiedTime = ?, modifiedFileDiffs = ? WHERE filePath = ?" (currentTime, serializedDiff, filePath)
             _ -> return () -- the file is not compiled yet, nothing to do
-          updateFileStates
+        updateFileStatesFor filePath
   
   , notificationHandler STextDocumentDidChange $ \msg -> runInContext "STextDocumentDidChange" $ withConnection $ \conn -> do
       let NotificationMessage _ _ (DidChangeTextDocumentParams (VersionedTextDocumentIdentifier uri _version) (LSP.List changes)) = msg
       ensureFileLocation' uri $ \filePath -> do
         let goodChanges = catMaybes $ map textDocChangeToSD changes
         liftLSP LSP.getConfig >>= \cf -> liftIO $ updateSavedFileRecords filePath goodChanges (cfFileRecords cf)
-        updateFileStates
+        updateFileStatesFor filePath
 
   , notificationHandler STextDocumentDidSave $ \msg -> runInContext "STextDocumentDidSave" $ withConnection $ \conn -> do
       let NotificationMessage _ _ (DidSaveTextDocumentParams (TextDocumentIdentifier uri) _reason) = msg
@@ -225,25 +226,36 @@ updateFileStates = do
   fr <- liftIO $ readMVar $ cfFileRecords cfg
   sendFileStates $ Map.toList $ Map.map frDiffs fr
 
+updateFileStatesFor :: FilePath -> LspMonad ()
+updateFileStatesFor filePath = do
+  cfg <- LSP.getConfig
+  fr <- liftIO $ readMVar $ cfFileRecords cfg
+  let status = Map.lookup filePath $ Map.map frDiffs fr
+  sendFileStates $ maybe [] ((:[]) . (filePath,)) status
+
 sendFileStates :: [(FilePath, SourceDiffs)] -> LspMonad ()
 sendFileStates states 
-  = liftLSP $ sendNotification (SCustomMethod "ChangeFileStates") 
-      $ A.Object $ KM.fromList [ ("result", A.Array $ V.fromList $ map (\(fp, diff) -> A.Object $ KM.fromList [("filePath", A.String $ T.pack fp), ("state", toState diff)]) states )]
-  where
-    toState diff = A.String $ if Map.null diff then "fresh" else "edited"
+  = liftLSP $ sendNotification changeFileStatesMethod $ createChangeFileStates states
 
-updateFileStates' :: FileRecords -> (FromServerMessage -> IO ()) -> IO ()
-updateFileStates' fileRecords messageHandler = do
+updateFileStatesIO :: FilePath -> FileRecords -> (FromServerMessage -> IO ()) -> IO ()
+updateFileStatesIO filePath fileRecords messageHandler = do
   fr <- readMVar fileRecords
-  sendFileStates' (Map.toList $ Map.map frDiffs fr) messageHandler
+  let status = Map.lookup filePath $ Map.map frDiffs fr
+  sendFileStatesIO (maybe [] ((:[]) . (filePath,)) status) messageHandler
 
-sendFileStates' :: [(FilePath, SourceDiffs)] -> (FromServerMessage -> IO ()) -> IO ()
-sendFileStates' states messageHandler
-  = messageHandler $ FromServerMess (SCustomMethod "ChangeFileStates") 
-      $ NotMess $ NotificationMessage "2.0" (SCustomMethod "ChangeFileStates") msg
+sendFileStatesIO :: [(FilePath, SourceDiffs)] -> (FromServerMessage -> IO ()) -> IO ()
+sendFileStatesIO states messageHandler
+  = messageHandler $ FromServerMess changeFileStatesMethod 
+      $ NotMess $ NotificationMessage "2.0" changeFileStatesMethod $ createChangeFileStates states
+
+createChangeFileStates :: [(FilePath, SourceDiffs)] -> A.Value
+createChangeFileStates states = A.Object $ KM.fromList [ ("result", payload )]
   where
-    msg = A.Object $ KM.fromList [ ("result", A.Array $ V.fromList $ map (\(fp, diff) -> A.Object $ KM.fromList [("filePath", A.String $ T.pack fp), ("state", toState diff)]) states )]
+    payload = A.Array $ V.fromList $ map diffToStates states
+    diffToStates (fp, diff) = A.Object $ KM.fromList [("filePath", A.String $ T.pack fp), ("state", toState diff)]
     toState diff = A.String $ if Map.null diff then "fresh" else "edited"
+
+changeFileStatesMethod = SCustomMethod "ChangeFileStates"
 
 -- Listens to the compile process changing the DB when the source is recompiled
 handleNotifications :: Connection -> FileRecords -> (FromServerMessage -> IO ()) -> IO ()
@@ -251,7 +263,7 @@ handleNotifications conn fileRecords messageHandler = do
   SQL.Notification _pid channel fileName <- SQL.getNotification conn
   when (channel == "module_clean") $ do
     markFileRecordsClean [BS.unpack fileName] fileRecords
-    updateFileStates' fileRecords messageHandler
+    updateFileStatesIO (BS.unpack fileName) fileRecords messageHandler
   handleNotifications conn fileRecords messageHandler
 
 getRewrites :: FilePath -> LspMonad SourceDiffs
@@ -361,7 +373,7 @@ updateSavedFileRecords fp newDiffs = modifyMVarPure $ Map.adjust updateDiffs fp
     updateDiffs (OpenFileRecord diffs compiledContent currentContent) =
       let (currentContent', diffs') = foldr (addExtraChange compiledContent) (currentContent, diffs) newDiffs
       in OpenFileRecord diffs' compiledContent currentContent'
-    updateDiffs _ = error $ "updateSavedFileRecords: file not open: " ++ fp
+    updateDiffs fr = fr
 
 replaceSourceDiffs :: FilePath -> SourceDiffs -> FileRecords -> IO ()
 replaceSourceDiffs fp diffs = modifyMVarPure $ Map.adjust (\fr -> fr{frDiffs = diffs}) fp
