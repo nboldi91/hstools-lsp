@@ -347,7 +347,7 @@ recordFileClosed conn fp mv
     updateRecord (Just (OpenFileRecord diffs compiledContent currentContent)) = do
       modifiedDiffs <- query conn "SELECT modifiedFileDiffs FROM modules WHERE filePath = ?" (Only fp)
       case modifiedDiffs of
-        [[src]] -> return $ FileRecord $ Map.fromAscList $ map read $ lines src
+        [[Just src]] -> return $ FileRecord $ Map.fromAscList $ map read $ lines src
         _ -> return $ FileRecord Map.empty
     updateRecord _ = error $ "recordFileClosed: file " ++ fp ++ " should have been on record"
 
