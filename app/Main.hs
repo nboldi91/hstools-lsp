@@ -234,6 +234,7 @@ updateFileStatesFor filePath = do
   sendFileStates $ maybe [] ((:[]) . (filePath,)) status
 
 sendFileStates :: [(FilePath, SourceDiffs)] -> LspMonad ()
+sendFileStates [] = return () 
 sendFileStates states 
   = liftLSP $ sendNotification changeFileStatesMethod $ createChangeFileStates states
 
@@ -244,6 +245,7 @@ updateFileStatesIO filePath fileRecords messageHandler = do
   sendFileStatesIO (maybe [] ((:[]) . (filePath,)) status) messageHandler
 
 sendFileStatesIO :: [(FilePath, SourceDiffs)] -> (FromServerMessage -> IO ()) -> IO ()
+sendFileStatesIO [] _ = return () 
 sendFileStatesIO states messageHandler
   = messageHandler $ FromServerMess changeFileStatesMethod 
       $ NotMess $ NotificationMessage "2.0" changeFileStatesMethod $ createChangeFileStates states
@@ -341,16 +343,20 @@ type FileRecords = MVar (Map.Map FilePath FileRecord)
 
 recordFileOpened :: Connection -> FilePath -> T.Text -> FileRecords -> IO ()
 recordFileOpened conn fp content mv
-  = modifyMVar_ mv $ \frs -> updateRecord (Map.lookup fp frs) >>= \r -> return $ Map.alter (const (Just r)) fp frs
+  = modifyMVar_ mv $ \frs -> updateRecord (Map.lookup fp frs) >>= \r -> return $ Map.alter (const r) fp frs
   where
-    updateRecord Nothing = return $ OpenFileRecord Map.empty contentLines contentLines
+    updateRecord Nothing = do
+      res <- query conn "SELECT compiledSource, modifiedFileDiffs FROM modules WHERE filePath = ?" (Only fp)
+      case res of
+        [] -> return Nothing
+        (src, diffs):_ -> return $ Just $ OpenFileRecord (maybe Map.empty deserializeSourceDiffs diffs) (toFileLines src) contentLines
     updateRecord (Just (FileRecord diffs)) = do
       compiledSource <- query conn "SELECT compiledSource FROM modules WHERE filePath = ?" (Only fp)
       case compiledSource of
-        [[Just src]] -> return $ OpenFileRecord diffs (lines src) contentLines
-        _ -> return (FileRecord diffs)
-    updateRecord (Just r) = return r
-    contentLines = lines $ T.unpack content
+        [[Just src]] -> return $ Just $ OpenFileRecord diffs (toFileLines src) contentLines
+        _ -> return Nothing
+    updateRecord (Just r) = return $ Just r
+    contentLines = toFileLines $ T.unpack content
 
 recordFileClosed :: Connection -> FilePath -> FileRecords -> IO ()
 recordFileClosed conn fp mv

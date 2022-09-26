@@ -171,9 +171,12 @@ addExtraChange compiledContent rewrite@(SourceRewrite start end replacement) (ac
 concatFileLines :: [FileLines] -> FileLines
 concatFileLines = foldl (\a b -> init a ++ [last a ++ head b] ++ tail b) [""] . filter (not . null)
 
+toFileLines :: String -> FileLines
+toFileLines = splitOn "\n"
+
 applySourceDiff :: SourceRewrite -> FileLines -> FileLines
 applySourceDiff (SourceRewrite start@(SP sl sc) end replacement) lns
-  = concatFileLines [prefix, splitOn "\n" replacement, postfix]
+  = concatFileLines [prefix, toFileLines replacement, postfix]
   where
     (_, postfix) = breakAtDPos start diff rest
     (prefix, rest) = breakAtPos start lns
