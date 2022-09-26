@@ -335,8 +335,8 @@ recordFileOpened conn fp content mv
     updateRecord (Just (FileRecord diffs)) = do
       compiledSource <- query conn "SELECT compiledSource FROM modules WHERE filePath = ?" (Only fp)
       case compiledSource of
-        [[src]] -> return $ OpenFileRecord diffs (lines src) contentLines
-        _ -> error $ "recordFileOpened: file " ++ fp ++ " should have been in the database"
+        [[Just src]] -> return $ OpenFileRecord diffs (lines src) contentLines
+        _ -> return (FileRecord diffs)
     updateRecord (Just r) = return r
     contentLines = lines $ T.unpack content
 
